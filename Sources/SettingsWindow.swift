@@ -13,22 +13,21 @@ final class ShortcutSettingsView: NSStackView {
     private(set) var modifiers: CGEventFlags
     private var monitor: Any?
     var isRecording: Bool { monitor != nil }
-    var willStartRecording: (() -> Void)?
 
     // Known macOS virtual key codes; excludes modifier-only and unassigned codes.
     private static let validCodes: Set<Int> = Set(0...50).union([51, 53, 64, 65, 67, 69, 71, 72, 73, 74, 75, 76, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 109, 110, 111, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126])
     static func validKeyCode(_ code: Int) -> Bool { validCodes.contains(code) }
 
-    init(configuration: HotkeyConfiguration, title: String = "Shortcut", showsMode: Bool = true) {
+    init(configuration: HotkeyConfiguration) {
         keyCode = Int(configuration.keyCode); modifiers = configuration.modifiers
         super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 6
-        addArrangedSubview(NSTextField(labelWithString: title))
+        addArrangedSubview(NSTextField(labelWithString: "New conversation shortcut"))
         recordButton.target = self; recordButton.action = #selector(startRecording)
         addArrangedSubview(recordButton); addArrangedSubview(hint)
         mode.addItems(withTitles: ["Push to talk (hold)", "Toggle recording"])
         mode.selectItem(at: configuration.mode == .hold ? 0 : 1)
-        if showsMode { addArrangedSubview(mode) }
+        addArrangedSubview(mode)
         updateTitle()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -36,7 +35,6 @@ final class ShortcutSettingsView: NSStackView {
 
     @objc private func startRecording() {
         guard monitor == nil else { stopRecording(); return }
-        willStartRecording?()
         hint.stringValue = "Press a key combination. Escape cancels."
         recordButton.title = "Recording… (click to cancel)"
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
@@ -92,65 +90,11 @@ final class ShortcutSettingsView: NSStackView {
     }
 }
 
-// Optional shortcuts are represented by both keys being present; removing either
-// disables the shortcut. DialogShortcut.load defines the runtime format.
-final class OptionalShortcutSettingsView: NSStackView {
-    let enabled = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    let recorder: ShortcutSettingsView
-    let prefix: String
-
-    init(title: String, prefix: String, defaults: UserDefaults) {
-        self.prefix = prefix
-        let saved = DialogShortcut.load(prefix: prefix, from: defaults)
-        recorder = ShortcutSettingsView(configuration: HotkeyConfiguration(keyCode: saved?.keyCode ?? 49, modifiers: saved?.modifiers ?? [.maskControl, .maskAlternate], mode: .hold), title: title, showsMode: false)
-        super.init(frame: .zero)
-        orientation = .vertical; alignment = .leading; spacing = 4
-        enabled.title = "Enable \(title.lowercased())"; enabled.state = saved == nil ? .off : .on
-        enabled.target = self; enabled.action = #selector(toggleEnabled)
-        addArrangedSubview(enabled); addArrangedSubview(recorder)
-        recorder.isHidden = saved == nil
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    @objc private func toggleEnabled() {
-        recorder.isHidden = enabled.state != .on
-        if recorder.isHidden { recorder.stopRecording() }
-    }
-    var value: DialogShortcut? {
-        guard enabled.state == .on else { return nil }
-        return DialogShortcut(keyCode: Int64(recorder.keyCode), modifiers: recorder.modifiers)
-    }
-    func persist(to defaults: UserDefaults) {
-        if let value = value {
-            defaults.set(Int(value.keyCode), forKey: prefix + "Code")
-            defaults.set(Int(value.modifiers.rawValue), forKey: prefix + "Modifiers")
-        } else {
-            defaults.removeObject(forKey: prefix + "Code")
-            defaults.removeObject(forKey: prefix + "Modifiers")
-        }
-    }
-}
-
-func shortcutValidationError(normal: DialogShortcut, optional: [DialogShortcut?]) -> String? {
-    var used = [normal]
-    for case let shortcut? in optional {
-        guard ShortcutSettingsView.validKeyCode(Int(shortcut.keyCode)), !shortcut.modifiers.isEmpty,
-              shortcut.modifiers == shortcut.modifiers.intersection(DialogShortcut.relevant) else {
-            return "Optional shortcuts need a valid key and at least one modifier."
-        }
-        if used.contains(where: { $0.keyCode == shortcut.keyCode && $0.modifiers == shortcut.modifiers }) {
-            return "Shortcuts must be different."
-        }
-        used.append(shortcut)
-    }
-    return nil
-}
-
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let defaults: UserDefaults
     private let shortcut: ShortcutSettingsView
-    private let newDialogShortcut: OptionalShortcutSettingsView
-    private let previousDialogShortcut: OptionalShortcutSettingsView
+    private let piModel = NSComboBox()
     private let engine = NSPopUpButton()
     private var fields: [String: NSTextField] = [:]
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
@@ -159,8 +103,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     init(defaults: UserDefaults, configuration: HotkeyConfiguration, onSave: @escaping (Int, CGEventFlags, String) -> Void) {
         self.defaults = defaults; self.onSave = onSave
         shortcut = ShortcutSettingsView(configuration: configuration)
-        newDialogShortcut = OptionalShortcutSettingsView(title: "New dialog shortcut", prefix: "newDialogShortcut", defaults: defaults)
-        previousDialogShortcut = OptionalShortcutSettingsView(title: "Previous/latest dialog shortcut", prefix: "previousDialogShortcut", defaults: defaults)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 650), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init()
         window.title = "Settings"; window.minSize = NSSize(width: 480, height: 400); window.delegate = self
@@ -180,15 +122,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             fields[key] = field; stack.addArrangedSubview(field)
             field.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         }
+        stack.insertArrangedSubview(NSTextField(labelWithString: "Pi model (provider/model)"), at: 1)
+        piModel.addItems(withObjectValues: [PiModel.defaultID, "router/6.2-astra-failover", PiModel.usePiDefault])
+        let savedModel = PiModel.load(from: defaults)
+        piModel.stringValue = savedModel.isEmpty ? PiModel.usePiDefault : savedModel
+        stack.insertArrangedSubview(piModel, at: 2)
+        piModel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         stack.addArrangedSubview(shortcut)
-        stack.addArrangedSubview(newDialogShortcut); stack.addArrangedSubview(previousDialogShortcut)
-        let recorders = [shortcut, newDialogShortcut.recorder, previousDialogShortcut.recorder]
-        for recorder in recorders {
-            recorder.willStartRecording = { [weak self, weak recorder] in
-                guard let self = self else { return }
-                for other in [self.shortcut, self.newDialogShortcut.recorder, self.previousDialogShortcut.recorder] where other !== recorder { other.stopRecording() }
-            }
-        }
         errorLabel.textColor = .systemRed; errorLabel.isHidden = true
         stack.addArrangedSubview(errorLabel); errorLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         let buttons = NSStackView(); buttons.orientation = .horizontal; buttons.spacing = 8
@@ -203,17 +143,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.center()
     }
     func show() { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil); NSApp.runModal(for: window); window.orderOut(nil) }
-    private func stopRecording() { shortcut.stopRecording(); newDialogShortcut.recorder.stopRecording(); previousDialogShortcut.recorder.stopRecording() }
+    private func stopRecording() { shortcut.stopRecording() }
     func windowShouldClose(_ sender: NSWindow) -> Bool { stopRecording(); NSApp.stopModal(); return true }
     @objc private func cancelPressed() { stopRecording(); NSApp.stopModal() }
     @objc private func savePressed() {
         let values = fields.mapValues { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
         func fail(_ message: String, _ field: NSView) { errorLabel.stringValue = message; errorLabel.isHidden = false; window.makeFirstResponder(field); field.scrollToVisible(field.bounds) }
-        guard ![shortcut, newDialogShortcut.recorder, previousDialogShortcut.recorder].contains(where: { $0.isRecording }) else { fail("Finish or cancel shortcut recording before saving.", shortcut); return }
+        guard !shortcut.isRecording else { fail("Finish or cancel shortcut recording before saving.", shortcut); return }
         let code = shortcut.keyCode
         guard ShortcutSettingsView.validKeyCode(code) else { fail("Record a valid non-modifier shortcut key.", shortcut); return }
-        if let error = shortcutValidationError(normal: DialogShortcut(keyCode: Int64(code), modifiers: shortcut.modifiers), optional: [newDialogShortcut.value, previousDialogShortcut.value]) {
-            fail(error, newDialogShortcut); return
+        guard let selectedModel = PiModel.preference(piModel.stringValue) else {
+            fail("Enter a provider/model ID or select Use Pi/session default.", piModel); return
         }
         let selected = engine.titleOfSelectedItem ?? "whisper"
         let keys = selected == "whisper" ? ["whisper", "model", "pi", "workingDirectory"] : ["gigaamPython", "pi", "workingDirectory"]
@@ -229,7 +169,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         if selected == "gigaam" && !cache.isEmpty && !cache.hasPrefix("/") { fail("GigaAM cache must be an absolute path.", fields["gigaamCache"]!); return }
         for (key, value) in values { defaults.set(value, forKey: key) }
         defaults.set(selected, forKey: "recognitionEngine")
-        newDialogShortcut.persist(to: defaults); previousDialogShortcut.persist(to: defaults)
+        defaults.set(selectedModel, forKey: PiModel.key)
         onSave(code, shortcut.modifiers, shortcut.mode.indexOfSelectedItem == 0 ? "hold" : "toggle")
         NSApp.stopModal()
     }
