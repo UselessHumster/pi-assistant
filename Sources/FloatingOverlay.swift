@@ -53,14 +53,13 @@ final class FloatingOverlayController: NSObject {
         ])
     }
 
-    func showRecording() {
+    func showRecording(toggle: Bool = false) {
         setLevel(0)
-        update("Recording", detail: "Listening to your voice", symbol: "mic.fill", recording: true)
+        update("Recording", detail: toggle ? "Press shortcut again to send" : "Release shortcut to send", symbol: "mic.fill", recording: true)
     }
 
     func setLevel(_ level: Float) { meter.doubleValue = level.isFinite ? Double(max(0, min(1, level))) : 0 }
     func showTranscribing() { update("Transcribing", detail: "Converting speech to text…", symbol: "waveform") }
-    func showThinking(text: String) { update("Asking Pi…", detail: text, symbol: "sparkles") }
     func showSuccess(response: String) { update("Response ready", detail: response, symbol: "checkmark.circle.fill", canOpen: true) }
     func showError(_ message: String) { update("Error", detail: message, symbol: "exclamationmark.triangle.fill", canOpen: true) }
     func hide() { panel.orderOut(nil) }

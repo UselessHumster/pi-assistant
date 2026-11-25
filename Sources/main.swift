@@ -79,16 +79,16 @@ final class App: NSObject, NSApplicationDelegate {
         if hotkey.reset() != nil { keyUp() }
         if let tap { CFMachPortInvalidate(tap); self.tap = nil }
         let options = ["AXTrustedCheckOptionPrompt": prompt] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(options) else {
+        guard CGPreflightListenEventAccess() || AXIsProcessTrustedWithOptions(options) else {
             if permissionTimer == nil {
                 let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-                    guard let self, AXIsProcessTrusted() else { return }
+                    guard let self, CGPreflightListenEventAccess() || AXIsProcessTrusted() else { return }
                     self.installTap(prompt: false)
                 }
                 permissionTimer = timer
                 RunLoop.main.add(timer, forMode: .common)
             }
-            idlePhase = "Enable Accessibility for the shortcut"
+            idlePhase = "Enable Accessibility or Input Monitoring for the shortcut"
             rebuildMenu()
             return
         }
@@ -150,7 +150,7 @@ final class App: NSObject, NSApplicationDelegate {
                 guard r.record() else { throw Failure.message("Could not start recording.") }
                 recorder = r; recordingURL = url; activity = "Recording…"
                 if recordingStartsNew {
-                    overlay.showRecording()
+                    overlay.showRecording(toggle: hotkey.configuration.mode == .toggle)
                     let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak r] _ in
                         guard let r else { return }
                         r.updateMeters()
@@ -218,6 +218,7 @@ final class App: NSObject, NSApplicationDelegate {
                 case .success(let text):
                     let session = voiceConversation(startNew: startNew, directory: self.workingDirectory, defaults: self.defaults)
                     self.submit(text, to: session, token: token, inOverlay: startNew)
+                    if startNew { self.openChat(focusNewConversation: true) }
                 case .failure(let error): self.finish(error: error.localizedDescription, inOverlay: startNew)
                 }
             }
@@ -234,7 +235,7 @@ final class App: NSObject, NSApplicationDelegate {
                           model: PiModel.load(from: defaults), extensions: extensions)
         operation = token; errorMessage = nil; activity = "Asking Pi…"
         pendingMessage = (session.id, text)
-        if inOverlay { overlay.showThinking(text: text) }
+        overlay.hide()
         rebuildMenu()
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { () throws -> String in
@@ -255,7 +256,7 @@ final class App: NSObject, NSApplicationDelegate {
                     if inOverlay && self.chat?.isVisible != true { self.overlay.showSuccess(response: response) }
                     else { self.overlay.hide() }
                     self.finish(error: nil, inOverlay: false)
-                case .failure(let error): self.finish(error: error.localizedDescription, inOverlay: inOverlay)
+                case .failure(let error): self.finish(error: error.localizedDescription, inOverlay: inOverlay && self.chat?.isVisible != true)
                 }
             }
         }
@@ -280,10 +281,12 @@ final class App: NSObject, NSApplicationDelegate {
         _ = createConversationSession(for: workingDirectory, defaults: defaults)
         errorMessage = nil
         rebuildMenu()
-        showChat()
+        openChat(focusNewConversation: true)
     }
 
-    @objc private func showChat() {
+    @objc private func showChat() { openChat() }
+
+    private func openChat(focusNewConversation: Bool = false) {
         if chat == nil {
             let window = ChatWindowController()
             window.onSelect = { [weak self] in self?.selectChat($0) }
@@ -313,7 +316,8 @@ final class App: NSObject, NSApplicationDelegate {
         if !busy && recorder == nil { overlay.hide() }
         if let chat {
             refreshChat(chat, catalog: conversationCatalog(for: directory, defaults: defaults))
-            chat.show()
+            if focusNewConversation { chat.showNewConversation() }
+            else { chat.show() }
         }
     }
 

@@ -13,7 +13,7 @@ struct OverlayTests {
         overlay.showRecording()
         overlay.setLevel(.infinity)
         overlay.showTranscribing()
-        overlay.showThinking(text: "question")
+        overlay.showRecording(toggle: true)
         overlay.showSuccess(response: "answer")
         let panel = NSApp.windows.first { $0 is NSPanel && $0.isVisible }!
         precondition(panel.screen!.visibleFrame.contains(panel.frame))

@@ -85,14 +85,14 @@ struct ChatWindowTests {
         window.makeFirstResponder(input)
         input.string = "keyboard"
         input.setSelectedRange(NSRange(location: 8, length: 0))
-        window.sendEvent(key(0, "a", flags: .command))
+        precondition(window.performKeyEquivalent(with: key(0, "a", flags: .command)))
         precondition(input.selectedRange() == NSRange(location: 0, length: 8))
         input.setSelectedRange(NSRange(location: 8, length: 0))
         input.keyDown(with: key(36, "\r"))
         precondition(input.string == "keyboard\n")
         input.keyDown(with: key(36, "\r", flags: .command))
         precondition(sent == "keyboard\n" && input.string.isEmpty)
-        window.sendEvent(key(3, "f", flags: .command))
+        precondition(window.performKeyEquivalent(with: key(3, "f", flags: .command)))
         precondition(search.currentEditor() === window.firstResponder)
         RunLoop.main.run(until: Date().addingTimeInterval(16))
         precondition(chat.isVisible && catalog.selectedID == b.id)
@@ -136,6 +136,20 @@ struct ChatWindowTests {
         precondition(!catalog.sessions[0].isArchived && table.numberOfRows == 0)
         archive.performClick(nil)
         precondition(table.numberOfRows == 2 && table.selectedRow == 1)
+        archive.performClick(nil)
+        searchFor("nonexistent")
+        chat.onCreate = {
+            let session = ConversationSession(id: "new-\(catalog.sessions.count)", title: "Conversation", isDraft: true)
+            catalog.sessions.append(session)
+            catalog.selectedID = session.id
+            chat.render(catalog: catalog, messages: [], phase: "", busy: false, recording: false)
+            chat.showNewConversation()
+        }
+        precondition(window.performKeyEquivalent(with: key(45, "n", flags: .command)))
+        precondition(catalog.sessions.count == 3 && archive.state == .off && search.stringValue.isEmpty)
+        precondition(table.selectedRow == 0 && history.string.isEmpty && window.firstResponder === input)
+        views.compactMap { $0 as? NSButton }.first { $0.title == "New Chat" }!.performClick(nil)
+        precondition(catalog.sessions.count == 4 && table.selectedRow == 0 && window.firstResponder === input)
         print("Chat window tests passed.")
     }
 }

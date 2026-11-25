@@ -146,6 +146,14 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         window.center()
     }
 
+    func showNewConversation() {
+        if showingArchive { toggleArchive() }
+        search.stringValue = ""
+        refreshRows()
+        show()
+        window.makeFirstResponder(input)
+    }
+
     func show() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -283,10 +291,7 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     @objc private func newChat() {
         guard create.isEnabled else { return }
-        if showingArchive { toggleArchive() }
-        search.stringValue = ""
         onCreate?()
-        window.makeFirstResponder(input)
     }
 
     @objc private func sendMessage() {
@@ -366,15 +371,15 @@ private final class ChatWindow: NSWindow {
     var onFind: (() -> Void)?
     var onNew: (() -> Void)?
 
-    override func sendEvent(_ event: NSEvent) {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown, event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command {
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "a" where firstResponder is MessageEditor: firstResponder?.selectAll(nil); return
-            case "f": onFind?(); return
-            case "n": onNew?(); return
+            switch event.characters(byApplyingModifiers: .command)?.lowercased() {
+            case "a" where firstResponder is MessageEditor: firstResponder?.selectAll(nil); return true
+            case "f": onFind?(); return true
+            case "n": if !event.isARepeat { onNew?() }; return true
             default: break
             }
         }
-        super.sendEvent(event)
+        return super.performKeyEquivalent(with: event)
     }
 }
