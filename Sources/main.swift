@@ -16,7 +16,13 @@ final class App: NSObject, NSApplicationDelegate {
     private var idlePhase = "Ready"
     private var activity: String?
     private var errorMessage: String?
-    private var latestReply: (id: String, text: String)?
+    private var latestReply: (id: String, messages: [ChatMessage])?
+    private var pendingMessage: (id: String, text: String)?
+    private var previewDirectory: String?
+    private var loadedPreviewIDs: Set<String> = []
+    private var previews: [String: String] = [:]
+    private let previewQueue = DispatchQueue(label: "chat-previews", qos: .utility)
+    private var previewRequest = UUID()
     private let overlay = FloatingOverlayController()
     private var chat: ChatWindowController?
     private var meterTimer: Timer?
@@ -176,7 +182,7 @@ final class App: NSObject, NSApplicationDelegate {
         discardRecording()
         _ = hotkey.reset()
         overlay.hide()
-        activity = nil
+        activity = nil; pendingMessage = nil
         rebuildMenu()
     }
 
@@ -227,6 +233,7 @@ final class App: NSObject, NSApplicationDelegate {
         let turn = PiTurn(executable: defaults.string(forKey: "pi") ?? "/opt/homebrew/bin/pi", directory: directory,
                           model: PiModel.load(from: defaults), extensions: extensions)
         operation = token; errorMessage = nil; activity = "Asking Pi…"
+        pendingMessage = (session.id, text)
         if inOverlay { overlay.showThinking(text: text) }
         rebuildMenu()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -238,10 +245,13 @@ final class App: NSObject, NSApplicationDelegate {
             let history = try? loadSessionTranscript(sessionID: session.id, directory: directory, storage: turn.storage)
             DispatchQueue.main.async {
                 guard self.operation === token else { return }
-                if let history { updateConversation(session.id, from: history, directory: directory, defaults: self.defaults) }
+                if let history {
+                    updateConversation(session.id, from: history, directory: directory, defaults: self.defaults)
+                    if self.previewDirectory == directory, let preview = history.previewTitle { self.previews[session.id] = preview }
+                }
                 switch result {
                 case .success(let response):
-                    self.latestReply = (session.id, "You:\n\(text)\n\nAssistant:\n\(response)")
+                    self.latestReply = (session.id, [.init(role: .user, text: text), .init(role: .assistant, text: response)])
                     if inOverlay && self.chat?.isVisible != true { self.overlay.showSuccess(response: response) }
                     else { self.overlay.hide() }
                     self.finish(error: nil, inOverlay: false)
@@ -252,7 +262,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     private func finish(error: String?, inOverlay: Bool) {
-        operation = nil; activity = nil; errorMessage = error
+        operation = nil; activity = nil; pendingMessage = nil; errorMessage = error
         if inOverlay, let error { overlay.showError(error) }
         rebuildMenu()
     }
@@ -303,14 +313,39 @@ final class App: NSObject, NSApplicationDelegate {
 
     private func refreshChat(_ chat: ChatWindowController, catalog: ConversationCatalog) {
         let id = catalog.selectedID
-        let history: String
+        let directory = workingDirectory
+        let storage = piSessionDirectory(for: directory)
+        if previewDirectory != directory {
+            previewDirectory = directory; loadedPreviewIDs = []; previews = [:]; previewRequest = UUID()
+        }
+        var messages: [ChatMessage] = []
+        var notice: String?
         do {
-            if let transcript = try loadTranscript(sessionID: id, directory: workingDirectory), !transcript.isEmpty { history = transcript }
-            else if let latestReply, latestReply.id == id { history = latestReply.text }
-            else { history = catalog.selected.isDraft == true ? "" : "Conversation history is missing." }
-        } catch { history = "Conversation history could not be read. The session may be invalid, inaccessible, or too large." }
-        let display = [history, errorMessage.map { "Error: \($0)" } ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        chat.render(catalog: catalog, history: display, phase: activity ?? idlePhase, busy: busy, recording: recorder != nil)
+            if let transcript = try loadSessionTranscript(sessionID: id, directory: directory, storage: storage) {
+                messages = transcript.messages
+                if let preview = transcript.previewTitle { previews[id] = preview }
+            } else if let latestReply, latestReply.id == id { messages = latestReply.messages }
+            else if catalog.selected.isDraft != true { notice = "Conversation history is missing." }
+        } catch { notice = "Could not read conversation history. The file may be invalid, inaccessible, or too large." }
+        if let pendingMessage, pendingMessage.id == id,
+           messages.last != ChatMessage(role: .user, text: pendingMessage.text) {
+            messages.append(ChatMessage(role: .user, text: pendingMessage.text))
+        }
+        chat.setPreviews(previews)
+        chat.render(catalog: catalog, messages: messages, phase: activity ?? (tap == nil ? idlePhase : ""),
+                    notice: errorMessage ?? notice, busy: busy, recording: recorder != nil)
+        let missing = Set(catalog.sessions.filter(\.needsDisplayTitle).map(\.id)).subtracting(loadedPreviewIDs)
+        guard !missing.isEmpty else { return }
+        loadedPreviewIDs.formUnion(missing)
+        let request = previewRequest
+        previewQueue.async { [weak self] in
+            let result = conversationPreviews(ids: missing, directory: directory, storage: storage)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.previewRequest == request else { return }
+                self.previews.merge(result) { current, _ in current }
+                self.chat?.setPreviews(self.previews)
+            }
+        }
     }
 
     @objc private func configure() {

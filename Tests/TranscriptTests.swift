@@ -35,6 +35,10 @@ import Foundation
         try body.write(to: file, atomically: true, encoding: .utf8)
         let text = try loadTranscript(sessionID: "abc", directory: root.path, environment: env)!
         precondition(text == "You:\nhello\n\nAssistant:\nanswer\n\nYou:\nnext")
+        precondition(conversationPreviews(ids: ["abc", "missing"], directory: root.path, storage: root) == ["abc": "hello"])
+        precondition(conversationPreviews(ids: ["abc"], directory: root.appendingPathComponent("other").path, storage: root).isEmpty)
+        let preview = SessionTranscript(messages: [.init(role: .user, text: String(repeating: "👩🏽‍💻", count: 50))], title: nil)
+        precondition(preview.previewTitle?.count == 49 && preview.previewTitle?.last == "…")
         do { _ = try transcriptText(Data(body.utf8), sessionID: "other", directory: root.path); preconditionFailure() } catch {}
         do { _ = try transcriptText(Data("garbage".utf8), sessionID: "abc", directory: root.path); preconditionFailure() } catch {}
         let bigFile = root.appendingPathComponent("big_large.jsonl")
@@ -45,6 +49,7 @@ import Foundation
         do { _ = try loadSessionTranscript(sessionID: "large", directory: root.path, storage: root); preconditionFailure() } catch TranscriptError.tooLarge {}
         let duplicate = root.appendingPathComponent("duplicate_abc.jsonl")
         try FileManager.default.copyItem(at: file, to: duplicate)
+        precondition(conversationPreviews(ids: ["abc"], directory: root.path, storage: root).isEmpty)
         do { _ = try hasSessionFile(id: "abc", directory: root.path, storage: root); preconditionFailure() } catch TranscriptError.ambiguous {}
         print("Transcript tests passed")
     }

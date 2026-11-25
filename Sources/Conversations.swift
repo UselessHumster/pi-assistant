@@ -5,6 +5,12 @@ struct ConversationSession: Codable {
     var title: String
     // Missing for older catalogs, whose sessions may already have history.
     var isDraft: Bool? = nil
+    var needsDisplayTitle: Bool { title == "Default" || title == "Conversation" }
+
+    func displayTitle(preview: String?) -> String {
+        guard needsDisplayTitle else { return title }
+        return preview ?? (isDraft == true ? "New Chat" : "Untitled conversation")
+    }
 }
 
 struct ConversationCatalog: Codable {
@@ -13,10 +19,11 @@ struct ConversationCatalog: Codable {
 
     var selected: ConversationSession { sessions.first { $0.id == selectedID }! }
 
-    func matching(_ query: String) -> [ConversationSession] {
+    func matching(_ query: String, previews: [String: String] = [:]) -> [ConversationSession] {
         let words = query.split(whereSeparator: \.isWhitespace)
         return sessions.reversed().filter { session in
-            words.allSatisfy { session.title.localizedStandardContains(String($0)) }
+            let title = session.displayTitle(preview: previews[session.id])
+            return words.allSatisfy { title.localizedStandardContains(String($0)) }
         }
     }
 }
@@ -70,7 +77,7 @@ func updateConversation(_ id: String, from transcript: SessionTranscript, direct
     guard let index = catalog.sessions.firstIndex(where: { $0.id == id }) else { return }
     catalog.sessions[index].isDraft = false
     if let title = transcript.title,
-       ["Default", "Conversation"].contains(catalog.sessions[index].title) {
+       catalog.sessions[index].needsDisplayTitle {
         catalog.sessions[index].title = title
     }
     saveConversationCatalog(catalog, key: conversationKey(directory), defaults: defaults)

@@ -1,8 +1,23 @@
 import Foundation
 
-struct SessionTranscript {
+struct ChatMessage: Equatable {
+    enum Role { case user, assistant }
+    let role: Role
     let text: String
+    var speaker: String { role == .user ? "You" : "Pi" }
+}
+
+struct SessionTranscript {
+    let messages: [ChatMessage]
     let title: String?
+
+    var text: String { messages.map { "\($0.role == .user ? "You" : "Assistant"):\n\($0.text)" }.joined(separator: "\n\n") }
+    var previewTitle: String? {
+        if let title { return title }
+        guard let first = messages.first(where: { $0.role == .user }) else { return nil }
+        let excerpt = first.text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return excerpt.count > 48 ? String(excerpt.prefix(48)) + "…" : excerpt
+    }
 }
 
 func transcriptText(_ data: Data, sessionID: String, directory: String) throws -> String {
@@ -21,7 +36,7 @@ private func validateSessionHeader(_ data: Data, sessionID: String, directory: S
 private func parseTranscript(_ data: Data, sessionID: String, directory: String) throws -> SessionTranscript {
     try validateSessionHeader(data, sessionID: sessionID, directory: directory)
     guard let source = String(data: data, encoding: .utf8) else { throw TranscriptError.invalid }
-    var entries: [String: (String?, String?)] = [:]
+    var entries: [String: (String?, ChatMessage?)] = [:]
     var leaf: String?
     var title: String?
     for line in source.split(separator: "\n").dropFirst() {
@@ -30,23 +45,23 @@ private func parseTranscript(_ data: Data, sessionID: String, directory: String)
             title = name.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
         guard let id = obj["id"] as? String, !id.isEmpty else { continue }
-        var text: String?
+        var turn: ChatMessage?
         if obj["type"] as? String == "message", let message = obj["message"] as? [String: Any], let role = message["role"] as? String, role == "user" || role == "assistant" {
             var pieces: [String] = []
             if let value = message["content"] as? String { pieces = [value] }
             if let blocks = message["content"] as? [[String: Any]] { pieces = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil } }
             let content = pieces.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !content.isEmpty { text = "\(role == "user" ? "You" : "Assistant"):\n\(content)" }
+            if !content.isEmpty { turn = ChatMessage(role: role == "user" ? .user : .assistant, text: content) }
         }
-        entries[id] = (obj["parentId"] as? String, text); leaf = id
+        entries[id] = (obj["parentId"] as? String, turn); leaf = id
     }
-    var result: [String] = []; var visited = Set<String>()
+    var result: [ChatMessage] = []; var visited = Set<String>()
     while let id = leaf {
         guard visited.insert(id).inserted, let entry = entries[id] else { throw TranscriptError.invalid }
         if let text = entry.1 { result.append(text) }
         leaf = entry.0
     }
-    return SessionTranscript(text: result.reversed().joined(separator: "\n\n"), title: title.flatMap { $0.isEmpty ? nil : $0 })
+    return SessionTranscript(messages: result.reversed(), title: title.flatMap { $0.isEmpty ? nil : $0 })
 }
 
 enum TranscriptError: Error { case invalid, ambiguous, tooLarge }
@@ -79,9 +94,28 @@ func loadTranscript(sessionID: String, directory: String, environment: [String: 
 
 func loadSessionTranscript(sessionID: String, directory: String, storage: URL) throws -> SessionTranscript? {
     guard let file = try sessionFile(id: sessionID, storage: storage) else { return nil }
-    let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize
-    guard (size ?? Int.max) <= 20_000_000 else { throw TranscriptError.tooLarge }
-    return try parseTranscript(Data(contentsOf: file), sessionID: sessionID, directory: directory)
+    return try readTranscriptFile(file, id: sessionID, directory: directory)
+}
+
+private func readTranscriptFile(_ file: URL, id: String, directory: String) throws -> SessionTranscript {
+    let values = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+    guard values.isRegularFile == true, values.isSymbolicLink != true else { throw TranscriptError.invalid }
+    guard (values.fileSize ?? Int.max) <= 20_000_000 else { throw TranscriptError.tooLarge }
+    return try parseTranscript(Data(contentsOf: file), sessionID: id, directory: directory)
+}
+
+// Read one directory listing for the whole sidebar, not one per row or keystroke.
+func conversationPreviews(ids: Set<String>, directory: String, storage: URL) -> [String: String] {
+    guard let files = try? FileManager.default.contentsOfDirectory(at: storage, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [:] }
+    let indexed = Dictionary(grouping: files.filter { $0.pathExtension == "jsonl" }) {
+        String($0.deletingPathExtension().lastPathComponent.split(separator: "_").last ?? "")
+    }
+    var previews: [String: String] = [:]
+    for id in ids {
+        guard let matches = indexed[id], matches.count == 1 else { continue }
+        previews[id] = (try? readTranscriptFile(matches[0], id: id, directory: directory))?.previewTitle
+    }
+    return previews
 }
 
 func hasSessionFile(id: String, directory: String, storage: URL) throws -> Bool {
