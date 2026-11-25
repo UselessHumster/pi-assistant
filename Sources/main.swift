@@ -288,6 +288,12 @@ final class App: NSObject, NSApplicationDelegate {
             let window = ChatWindowController()
             window.onSelect = { [weak self] in self?.selectChat($0) }
             window.onCreate = { [weak self] in self?.createChat() }
+            window.onArchive = { [weak self] id, archived in
+                guard let self, self.canSwitchChat else { return }
+                setConversationArchived(archived, id: id, directory: self.workingDirectory, defaults: self.defaults)
+                self.errorMessage = nil
+                self.rebuildMenu()
+            }
             window.onSend = { [weak self] input in
                 let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let self, self.canSwitchChat, !text.isEmpty else { return false }

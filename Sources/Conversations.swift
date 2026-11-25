@@ -5,6 +5,8 @@ struct ConversationSession: Codable {
     var title: String
     // Missing for older catalogs, whose sessions may already have history.
     var isDraft: Bool? = nil
+    var archived: Bool? = nil
+    var isArchived: Bool { archived == true }
     var needsDisplayTitle: Bool { title == "Default" || title == "Conversation" }
 
     func displayTitle(preview: String?) -> String {
@@ -19,9 +21,10 @@ struct ConversationCatalog: Codable {
 
     var selected: ConversationSession { sessions.first { $0.id == selectedID }! }
 
-    func matching(_ query: String, previews: [String: String] = [:]) -> [ConversationSession] {
+    func matching(_ query: String, previews: [String: String] = [:], showArchive: Bool = false) -> [ConversationSession] {
         let words = query.split(whereSeparator: \.isWhitespace)
         return sessions.reversed().filter { session in
+            if words.isEmpty { return session.isArchived == showArchive }
             let title = session.displayTitle(preview: previews[session.id])
             return words.allSatisfy { title.localizedStandardContains(String($0)) }
         }
@@ -64,6 +67,16 @@ func selectConversationSession(_ id: String, for directory: String, defaults: Us
     var catalog = conversationCatalog(for: directory, defaults: defaults)
     guard id != catalog.selectedID, catalog.sessions.contains(where: { $0.id == id }) else { return }
     catalog.selectedID = id
+    saveConversationCatalog(catalog, key: conversationKey(directory), defaults: defaults)
+}
+
+func setConversationArchived(_ archived: Bool, id: String, directory: String, defaults: UserDefaults) {
+    var catalog = conversationCatalog(for: directory, defaults: defaults)
+    guard let index = catalog.sessions.firstIndex(where: { $0.id == id }),
+          catalog.sessions[index].isArchived != archived else { return }
+    catalog.sessions[index].archived = archived ? true : nil
+    if archived, catalog.selectedID == id,
+       let next = catalog.sessions.last(where: { !$0.isArchived }) { catalog.selectedID = next.id }
     saveConversationCatalog(catalog, key: conversationKey(directory), defaults: defaults)
 }
 

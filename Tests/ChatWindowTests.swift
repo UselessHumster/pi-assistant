@@ -85,6 +85,9 @@ struct ChatWindowTests {
         window.makeFirstResponder(input)
         input.string = "keyboard"
         input.setSelectedRange(NSRange(location: 8, length: 0))
+        window.sendEvent(key(0, "a", flags: .command))
+        precondition(input.selectedRange() == NSRange(location: 0, length: 8))
+        input.setSelectedRange(NSRange(location: 8, length: 0))
         input.keyDown(with: key(36, "\r"))
         precondition(input.string == "keyboard\n")
         input.keyDown(with: key(36, "\r", flags: .command))
@@ -97,6 +100,42 @@ struct ChatWindowTests {
         precondition(!chat.isVisible)
         chat.show()
         precondition(chat.isVisible && history.string.contains("Second transcript") && table.selectedRow == 0)
+        let archive = views.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Archive" }!
+        chat.onArchive = { id, archived in
+            let index = catalog.sessions.firstIndex { $0.id == id }!
+            catalog.sessions[index].archived = archived
+            render("Second transcript")
+        }
+        func rowMenu(_ row: Int) -> NSMenuItem {
+            let rect = table.rect(ofRow: row)
+            let point = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [], timestamp: 0,
+                                           windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            let hit = content.hitTest(content.convert(point, from: nil))
+            return hit!.menu(for: event)!.items[0]
+        }
+        func invoke(_ item: NSMenuItem, titled title: String) {
+            precondition(item.title == title)
+            precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
+        }
+        searchFor("")
+        let otherRow = rowMenu(1)
+        precondition(otherRow.representedObject as? String == a.id && catalog.selectedID == b.id)
+        invoke(otherRow, titled: "Archive Chat")
+        precondition(catalog.sessions[0].isArchived && table.numberOfRows == 1 && catalog.selectedID == b.id)
+        searchFor("НЕДЕЛЮ")
+        precondition(table.numberOfRows == 1 && table.selectedRow == -1)
+        archive.performClick(nil)
+        precondition(archive.state == .on && table.numberOfRows == 1 && search.stringValue.isEmpty)
+        searchFor("CAFE")
+        precondition(table.numberOfRows == 1 && table.selectedRow == 0)
+        searchFor("")
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        precondition(catalog.selectedID == a.id)
+        invoke(rowMenu(0), titled: "Restore from Archive")
+        precondition(!catalog.sessions[0].isArchived && table.numberOfRows == 0)
+        archive.performClick(nil)
+        precondition(table.numberOfRows == 2 && table.selectedRow == 1)
         print("Chat window tests passed.")
     }
 }

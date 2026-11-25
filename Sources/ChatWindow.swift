@@ -5,11 +5,12 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     var onCreate: (() -> Void)?
     var onSend: ((String) -> Bool)?
     var onVoice: (() -> Void)?
+    var onArchive: ((String, Bool) -> Void)?
 
     private let window = ChatWindow(contentRect: NSRect(x: 0, y: 0, width: 930, height: 630),
                                     styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     private let search = NSSearchField()
-    private let table = NSTableView()
+    private let table = ConversationTable()
     private let transcript = NSTextView()
     private let input = MessageEditor()
     private let status = NSTextField(labelWithString: "")
@@ -18,6 +19,8 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     private let empty = NSTextField(wrappingLabelWithString: "Type a message or record one to get started.")
     private let noResults = NSTextField(labelWithString: "No matching conversations")
     private lazy var create = NSButton(title: "New Chat", target: self, action: #selector(newChat))
+    private lazy var archive = NSButton(title: "", target: self, action: #selector(toggleArchive))
+    private var showingArchive = false
     private lazy var send = NSButton(title: "Send", target: self, action: #selector(sendMessage))
     private lazy var voice = NSButton(title: "Record", target: self, action: #selector(voicePressed))
     private var catalog: ConversationCatalog?
@@ -53,7 +56,14 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
             detail.leadingAnchor.constraint(equalTo: divider.trailingAnchor), detail.trailingAnchor.constraint(equalTo: content.trailingAnchor)
         ] + [sidebar, divider, detail].flatMap { [$0.topAnchor.constraint(equalTo: content.topAnchor), $0.bottomAnchor.constraint(equalTo: content.bottomAnchor)] })
 
-        search.placeholderString = "Search chats"; search.delegate = self
+        search.placeholderString = "Search all chats"; search.delegate = self
+        search.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        archive.setButtonType(.toggle)
+        archive.image = NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Archive")
+        archive.imagePosition = .imageOnly
+        archive.setAccessibilityLabel("Archive")
+        archive.toolTip = "Show archived conversations"
+        let searchBar = NSStackView(views: [search, archive]); searchBar.spacing = 6; searchBar.alignment = .centerY
         search.toolTip = "Search conversations (⌘F)"
         create.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
         create.imagePosition = .imageLeading
@@ -63,15 +73,17 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         table.style = .plain; table.selectionHighlightStyle = .regular
         table.backgroundColor = .clear; table.rowHeight = 32
         table.delegate = self; table.dataSource = self
+        table.contextMenu = { [weak self] row in self?.archiveMenu(for: row) }
         let list = scrollView(for: table)
         noResults.textColor = .secondaryLabelColor; noResults.alignment = .center
-        for view in [create, search, list, noResults] { view.translatesAutoresizingMaskIntoConstraints = false; sidebar.addSubview(view) }
+        for view in [create, searchBar, list, noResults] { view.translatesAutoresizingMaskIntoConstraints = false; sidebar.addSubview(view) }
         NSLayoutConstraint.activate([
             create.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 14),
-            search.topAnchor.constraint(equalTo: create.bottomAnchor, constant: 10),
-            list.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8), list.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -10),
+            searchBar.topAnchor.constraint(equalTo: create.bottomAnchor, constant: 10),
+            archive.widthAnchor.constraint(equalToConstant: 30),
+            list.topAnchor.constraint(equalTo: searchBar.bottomAnchor, constant: 8), list.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -10),
             noResults.topAnchor.constraint(equalTo: list.topAnchor, constant: 18)
-        ] + [create, search, list, noResults].flatMap {
+        ] + [create, searchBar, list, noResults].flatMap {
             [$0.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12), $0.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12)]
         })
 
@@ -154,7 +166,8 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
             if follow { transcript.scrollToEndOfDocument(nil) }
         }
         empty.isHidden = !messages.isEmpty || notice != nil || busy || recording
-        status.stringValue = phase; status.isHidden = phase.isEmpty; status.toolTip = phase
+        let statusText = phase.isEmpty && catalog.selected.isArchived ? "Archived conversation" : phase
+        status.stringValue = statusText; status.isHidden = statusText.isEmpty; status.toolTip = statusText
         self.notice.stringValue = notice ?? ""; self.notice.isHidden = notice == nil; self.notice.toolTip = notice
         voice.title = recording ? "Stop & Send" : (busy ? "Cancel" : "Record")
         input.isEditable = !busy && !recording
@@ -181,7 +194,9 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     private func refreshRows() {
         if let catalog { heading.stringValue = title(for: catalog.selected); heading.toolTip = heading.stringValue }
-        let next = catalog?.matching(search.stringValue, previews: previews) ?? []
+        let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next = catalog?.matching(query, previews: previews, showArchive: showingArchive) ?? []
+        noResults.stringValue = query.isEmpty ? (showingArchive ? "Archive is empty" : "No active conversations") : "No matching conversations"
         updatingSelection = true
         defer { updatingSelection = false }
         rows = next
@@ -199,15 +214,24 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { ConversationRow() }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let label = NSTextField(labelWithString: title(for: rows[row]))
+        let session = rows[row]
+        let label = NSTextField(labelWithString: title(for: session))
         label.font = .systemFont(ofSize: 13, weight: .medium); label.lineBreakMode = .byTruncatingTail
         let cell = NSTableCellView()
         cell.textField = label; cell.toolTip = label.stringValue
-        label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
+        var views: [NSView] = [label]
+        if session.isArchived && !search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let icon = NSImageView(image: NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Archived")!)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+            views.append(icon)
+        }
+        let rowContent = NSStackView(views: views); rowContent.spacing = 5
+        rowContent.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(rowContent)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            rowContent.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            rowContent.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            rowContent.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         return cell
     }
@@ -231,8 +255,35 @@ final class ChatWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         return scroll
     }
 
+    private func archiveMenu(for row: Int) -> NSMenu? {
+        guard table.isEnabled, rows.indices.contains(row) else { return nil }
+        let session = rows[row]
+        let menu = NSMenu()
+        let action = NSMenuItem(title: session.isArchived ? "Restore from Archive" : "Archive Chat",
+                                action: #selector(changeArchive(_:)), keyEquivalent: "")
+        action.target = self; action.representedObject = session.id
+        menu.addItem(action)
+        return menu
+    }
+
+    @objc private func changeArchive(_ sender: NSMenuItem) {
+        guard table.isEnabled, let id = sender.representedObject as? String,
+              let session = catalog?.sessions.first(where: { $0.id == id }) else { return }
+        onArchive?(id, !session.isArchived)
+    }
+
+    @objc private func toggleArchive() {
+        showingArchive.toggle()
+        archive.state = showingArchive ? .on : .off
+        archive.image = NSImage(systemSymbolName: showingArchive ? "archivebox.fill" : "archivebox", accessibilityDescription: "Archive")
+        archive.toolTip = showingArchive ? "Back to active conversations" : "Show archived conversations"
+        search.stringValue = ""
+        refreshRows()
+    }
+
     @objc private func newChat() {
         guard create.isEnabled else { return }
+        if showingArchive { toggleArchive() }
         search.stringValue = ""
         onCreate?()
         window.makeFirstResponder(input)
@@ -276,6 +327,14 @@ private final class ChatCanvas: NSView {
     }
 }
 
+private final class ConversationTable: NSTableView {
+    var contextMenu: ((Int) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenu?(row(at: convert(event.locationInWindow, from: nil)))
+    }
+}
+
 private final class ConversationRow: NSTableRowView {
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
@@ -310,6 +369,7 @@ private final class ChatWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command {
             switch event.charactersIgnoringModifiers?.lowercased() {
+            case "a" where firstResponder is MessageEditor: firstResponder?.selectAll(nil); return
             case "f": onFind?(); return
             case "n": onNew?(); return
             default: break
